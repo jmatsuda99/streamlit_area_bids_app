@@ -263,21 +263,31 @@ if fdf.empty:
 # 集計ユーティリティ
 # -----------------------------
 def resample_frame(frame: pd.DataFrame, on: str, by_region: bool, metrics: list, freq: str, how: str):
+    """
+    Resample only the numeric metric columns to avoid TypeError from object columns.
+    """
     tmp = frame[[on, region_col] + metrics].dropna(subset=[on]).copy()
     tmp = tmp.sort_values(on)
     rule = {"日次":"D","週次":"W","月次":"MS"}[freq]
     agg_map = {"平均":"mean","合計":"sum","中央値":"median"}[how]
+    # Ensure datetime index
     tmp = tmp.set_index(on)
+
+    # Cast metric columns to numeric again (safety)
+    for m in metrics:
+        tmp[m] = pd.to_numeric(tmp[m], errors="coerce")
+
     if by_region:
-        grp = tmp.groupby(region_col)
         out = []
-        for g, gdf in grp:
-            agg = gdf.resample(rule).agg(agg_map)
-            agg[region_col] = g
-            out.append(agg.reset_index())
+        for g, gdf in tmp.groupby(region_col):
+            # Only resample metric columns to avoid non-numeric aggregation
+            num = gdf[metrics].resample(rule).agg(agg_map)
+            num[region_col] = g
+            num = num.reset_index()
+            out.append(num)
         res = pd.concat(out, ignore_index=True)
     else:
-        res = tmp.resample(rule).agg(agg_map).reset_index()
+        res = tmp[metrics].resample(rule).agg(agg_map).reset_index()
     return res
 
 # -----------------------------
@@ -369,3 +379,17 @@ with coly:
         )
 
 st.caption("© Streamlit app template for area bids by region (JP).")
+
+# ---- Numeric-only hardening for metrics ----
+def _coerce_numeric_columns(df_in: pd.DataFrame, cols: list[str]):
+    safe_cols = []
+    dropped_cols = []
+    for c in cols:
+        ser = pd.to_numeric(df_in[c].astype(str).str.replace(",", ""), errors="coerce")
+        if ser.notna().any():
+            df_in[c] = ser
+            safe_cols.append(c)
+        else:
+            dropped_cols.append(c)
+    return df_in, safe_cols, dropped_cols
+
