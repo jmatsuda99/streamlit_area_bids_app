@@ -249,7 +249,7 @@ min_d, max_d = valid_dates.min().date(), valid_dates.max().date()
 if min_d > max_d:
     min_d, max_d = max_d, min_d
 r = st.slider("期間を指定", min_value=min_d, max_value=max_d, value=(min_d, max_d))
-freq = st.selectbox("集計粒度", options=["日次","週次","月次"], index=2)
+freq = st.selectbox("集計粒度", options=["生データ(180分)","日次","週次","月次"], index=1)
 agg_mode = st.selectbox("集計方法", options=["平均","合計","中央値"], index=0)
 
 mask = (df[region_col].astype(str).isin(sel_regions)) & (df[date_col].dt.date.between(r[0], r[1]))
@@ -264,12 +264,15 @@ if fdf.empty:
 # -----------------------------
 def resample_frame(frame: pd.DataFrame, on: str, by_region: bool, metrics: list, freq: str, how: str):
     """
-    Resample only the numeric metric columns to avoid TypeError from object columns.
+    Resample with selectable frequency. For '生データ(180分)', bypass aggregation and return raw 180min data.
     """
     tmp = frame[[on, region_col] + metrics].dropna(subset=[on]).copy()
     tmp = tmp.sort_values(on)
-    rule = {"日次":"D","週次":"W","月次":"MS"}[freq]
+    # Map label -> pandas rule; RAW means no resample
+    rule_map = {"生データ(180分)": "RAW", "日次": "D", "週次": "W", "月次": "MS"}
+    rule = rule_map.get(freq, "MS")
     agg_map = {"平均":"mean","合計":"sum","中央値":"median"}[how]
+
     # Ensure datetime index
     tmp = tmp.set_index(on)
 
@@ -277,10 +280,17 @@ def resample_frame(frame: pd.DataFrame, on: str, by_region: bool, metrics: list,
     for m in metrics:
         tmp[m] = pd.to_numeric(tmp[m], errors="coerce")
 
+    if rule == "RAW":
+        # Return raw rows (no resample). Keep needed columns.
+        if by_region:
+            res = tmp.reset_index()[[on, region_col] + metrics]
+        else:
+            res = tmp.reset_index()[[on] + metrics]
+        return res
+
     if by_region:
         out = []
         for g, gdf in tmp.groupby(region_col):
-            # Only resample metric columns to avoid non-numeric aggregation
             num = gdf[metrics].resample(rule).agg(agg_map)
             num[region_col] = g
             num = num.reset_index()
