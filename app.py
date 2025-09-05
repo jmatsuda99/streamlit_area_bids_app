@@ -332,15 +332,19 @@ if metric_cols:
         st.altair_chart(chart, use_container_width=True)
 
     st.markdown("**地域比較（期間内の集計値）**")
-    agg_func = {"平均":"mean","合計":"sum","中央値":"median"}[agg_mode]
-    comp = fdf.groupby(region_col)[metric_cols].agg(agg_func).reset_index()
-    chart = alt.Chart(comp.melt(id_vars=[region_col], var_name="項目", value_name="値")).mark_bar().encode(
-        x=alt.X("項目:N", title="項目"),
-        y=alt.Y("値:Q", title="値"),
-        color=alt.Color(f"{region_col}:N", title="地域"),
-        column=alt.Column(f"{region_col}:N", title="地域")
-    ).properties(height=280)
-    st.altair_chart(chart, use_container_width=True)
+agg_func = {"平均":"mean","合計":"sum","中央値":"median"}[agg_mode]
+comp = fdf.groupby(region_col)[safe_metric_cols].agg(agg_func).reset_index()
+melted = comp.melt(id_vars=[region_col], var_name="項目", value_name="値")
+
+# 項目ごとに、選択した複数の地域を1つのグラフ（グループ化棒グラフ）で表示
+chart = alt.Chart(melted).mark_bar().encode(
+    x=alt.X("項目:N", title="項目"),
+    xOffset=alt.XOffset(f"{region_col}:N"),
+    y=alt.Y("値:Q", title="値"),
+    color=alt.Color(f"{region_col}:N", title="地域"),
+    tooltip=["項目", region_col, "値"]
+).properties(height=320)
+st.altair_chart(chart, use_container_width=True)
 
     st.markdown("**分布（ヒストグラム）**")
     m = st.selectbox("ヒストグラムの対象列", options=metric_cols, index=0)
