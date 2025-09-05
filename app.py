@@ -126,7 +126,25 @@ def reset_db():
     with get_conn() as conn:
         conn.execute("DROP TABLE IF EXISTS records;")
         conn.execute("DROP TABLE IF EXISTS meta;")
-    init_db()
+    
+
+# ---- Numeric-only hardening for metrics ----
+def _coerce_numeric_columns(df_in: pd.DataFrame, cols):
+    safe_cols = []
+    dropped_cols = []
+    if cols is None:
+        return df_in, [], []
+    for c in cols:
+        if c not in df_in.columns:
+            continue
+        ser = pd.to_numeric(df_in[c].astype(str).str.replace(",", ""), errors="coerce")
+        if ser.notna().any():
+            df_in[c] = ser
+            safe_cols.append(c)
+        else:
+            dropped_cols.append(c)
+    return df_in, safe_cols, dropped_cols
+init_db()
 
 # -----------------------------
 # Init
@@ -211,6 +229,13 @@ start_date = st.date_input("開始日", value=date(2024,4,1))
 start_time = st.time_input("開始時刻", value=time(0,0))
 
 df = raw_df.copy()
+
+# 数値列の安全化と自動除外（全NaN列は除く）
+df, safe_metric_cols, dropped_metrics = _coerce_numeric_columns(df, metric_cols)
+if 'safe_metric_cols' not in locals():
+    safe_metric_cols = metric_cols
+if dropped_metrics:
+    st.warning('数値化できなかった列を除外しました: ' + ', '.join(dropped_metrics))
 
 if rebuild:
     start_dt = datetime.combine(start_date, start_time)
@@ -393,15 +418,3 @@ with coly:
 
 st.caption("© Streamlit app template for area bids by region (JP).")
 
-# ---- Numeric-only hardening for metrics ----
-def _coerce_numeric_columns(df_in: pd.DataFrame, cols: list[str]):
-    safe_cols = []
-    dropped_cols = []
-    for c in cols:
-        ser = pd.to_numeric(df_in[c].astype(str).str.replace(",", ""), errors="coerce")
-        if ser.notna().any():
-            df_in[c] = ser
-            safe_cols.append(c)
-        else:
-            dropped_cols.append(c)
-    return df_in, safe_cols, dropped_cols
