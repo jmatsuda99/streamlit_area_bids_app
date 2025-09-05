@@ -343,6 +343,69 @@ with kc4:
 # -----------------------------
 st.subheader("📊 可視化")
 
+# -----------------------------
+# 比率可視化（分子/分母）
+# -----------------------------
+st.subheader("🧮 比率（分子/分母）")
+if safe_metric_cols:
+    cnum, cden = st.columns(2)
+    with cnum:
+        ratio_num = st.selectbox("分子（系列）", options=safe_metric_cols, index=0, key="ratio_num")
+    with cden:
+        ratio_den = st.selectbox("分母（系列）", options=[c for c in safe_metric_cols if c != ratio_num] or safe_metric_cols, index=0, key="ratio_den")
+
+    # 計算ユーティリティ：NaN/ゼロ除去、0..1にクリップ（オプション）
+    def _compute_ratio(frame, num_col, den_col):
+        out = frame[[date_col, region_col, num_col, den_col]].copy()
+        out[num_col] = pd.to_numeric(out[num_col], errors="coerce")
+        out[den_col] = pd.to_numeric(out[den_col], errors="coerce")
+        # 0除算回避
+        out = out[out[den_col].notna() & (out[den_col] != 0)]
+        out["__ratio__"] = out[num_col] / out[den_col]
+        return out[[date_col, region_col, "__ratio__"]]
+
+    # (A) 時系列（地域別、選択粒度）
+    st.markdown("**時系列（比率）**")
+    # まず選択メトリクスをリサンプリング（RAWは生データ）
+    rs = resample_frame(fdf, on=date_col, by_region=True, metrics=[ratio_num, ratio_den], freq=freq, how=agg_mode)
+    if "生データ(180分)" in freq:
+        rs_ratio = _compute_ratio(rs.rename(columns={ratio_num: ratio_num, ratio_den: ratio_den}), ratio_num, ratio_den)
+    else:
+        # 期間内の集計関数の選択に従っているため、リサンプル後の列をそのまま比率化
+        rs_ratio = _compute_ratio(rs, ratio_num, ratio_den)
+
+    chart_ratio = alt.Chart(rs_ratio).mark_line(point=True).encode(
+        x=alt.X(f"{date_col}:T", title="日時"),
+        y=alt.Y("__ratio__:Q", title="比率", axis=alt.Axis(format='%')),
+        color=alt.Color(f"{region_col}:N", title="地域"),
+        tooltip=[date_col, region_col, alt.Tooltip("__ratio__:Q", title="比率", format=".1%")]
+    ).properties(height=300)
+    st.altair_chart(chart_ratio, use_container_width=True)
+
+    # (B) 地域比較（Σ分子/Σ分母）
+    st.markdown("**地域比較（Σ分子/Σ分母）**")
+    grp = fdf.groupby(region_col, dropna=True)
+    comp_ratio = grp[ratio_num].sum(min_count=1) / grp[ratio_den].sum(min_count=1)
+    comp_ratio = comp_ratio.reset_index(name="比率").dropna(subset=["比率"])
+    chart_comp_ratio = alt.Chart(comp_ratio).mark_bar().encode(
+        x=alt.X(f"{region_col}:N", title="地域"),
+        y=alt.Y("比率:Q", title="比率", axis=alt.Axis(format='%')),
+        color=alt.Color(f"{region_col}:N", title="地域"),
+        tooltip=[region_col, alt.Tooltip("比率:Q", title="比率", format=".1%")]
+    ).properties(height=320)
+    st.altair_chart(chart_comp_ratio, use_container_width=True)
+
+    # (C) ダウンロード（時系列の比率）
+    st.download_button(
+        "比率の時系列（CSV）をダウンロード",
+        data=rs_ratio.rename(columns={"__ratio__": "ratio"}).to_csv(index=False).encode("utf-8-sig"),
+        file_name="ratio_timeseries.csv",
+        mime="text/csv"
+    )
+else:
+    st.info("比率計算には数値列が必要です。まずは数値列を選択してください。")
+
+
 if safe_metric_cols:
     for m in safe_metric_cols:
         st.markdown(f"**時系列（{m}）**")
