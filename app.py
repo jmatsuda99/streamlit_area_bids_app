@@ -231,9 +231,8 @@ try:
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
 except Exception as e:
     st.warning(f"日付変換でエラー: {e}")
-for m in metric_cols:
+for m in safe_metric_cols:
     df[m] = pd.to_numeric(df[m].astype(str).str.replace(",", ""), errors="coerce")
-
 # -----------------------------
 # フィルタ
 # -----------------------------
@@ -319,8 +318,8 @@ with kc4:
 # -----------------------------
 st.subheader("📊 可視化")
 
-if metric_cols:
-    for m in metric_cols:
+if safe_metric_cols:
+    for m in safe_metric_cols:
         st.markdown(f"**時系列（{m}）**")
         ts = resample_frame(fdf, on=date_col, by_region=True, metrics=[m], freq=freq, how=agg_mode)
         chart = alt.Chart(ts).mark_line(point=True).encode(
@@ -332,22 +331,22 @@ if metric_cols:
         st.altair_chart(chart, use_container_width=True)
 
     st.markdown("**地域比較（期間内の集計値）**")
-agg_func = {"平均":"mean","合計":"sum","中央値":"median"}[agg_mode]
-comp = fdf.groupby(region_col)[safe_metric_cols].agg(agg_func).reset_index()
-melted = comp.melt(id_vars=[region_col], var_name="項目", value_name="値")
-
-# 項目ごとに、選択した複数の地域を1つのグラフ（グループ化棒グラフ）で表示
-chart = alt.Chart(melted).mark_bar().encode(
-    x=alt.X("項目:N", title="項目"),
-    xOffset=alt.XOffset(f"{region_col}:N"),
-    y=alt.Y("値:Q", title="値"),
-    color=alt.Color(f"{region_col}:N", title="地域"),
-    tooltip=["項目", region_col, "値"]
-).properties(height=320)
-st.altair_chart(chart, use_container_width=True)
+    agg_func = {"平均":"mean","合計":"sum","中央値":"median"}[agg_mode]
+    comp = fdf.groupby(region_col)[safe_metric_cols].agg(agg_func).reset_index()
+    melted = comp.melt(id_vars=[region_col], var_name="項目", value_name="値")
+    
+    # 項目ごとに、選択した複数の地域を1つのグラフ（グループ化棒グラフ）で表示
+    chart = alt.Chart(melted).mark_bar().encode(
+        x=alt.X("項目:N", title="項目"),
+        xOffset=alt.XOffset(f"{region_col}:N"),
+        y=alt.Y("値:Q", title="値"),
+        color=alt.Color(f"{region_col}:N", title="地域"),
+        tooltip=["項目", region_col, "値"]
+    ).properties(height=320)
+    st.altair_chart(chart, use_container_width=True)
 
     st.markdown("**分布（ヒストグラム）**")
-    m = st.selectbox("ヒストグラムの対象列", options=metric_cols, index=0)
+    m = st.selectbox("ヒストグラムの対象列", options=safe_metric_cols, index=0)
     series = fdf[m].dropna()
     if len(series) > 0:
         q5, q95 = np.nanpercentile(series, 5), np.nanpercentile(series, 95)
@@ -361,7 +360,7 @@ st.altair_chart(chart, use_container_width=True)
         st.info("ヒストグラム対象の有効データがありません。")
 
     st.markdown("**ピボット（地域 × 月）**")
-    m = st.selectbox("ピボット表示の対象列", options=metric_cols, index=0, key="pivot_metric")
+    m = st.selectbox("ピボット表示の対象列", options=safe_metric_cols, index=0, key="pivot_metric")
     tmp = fdf[[date_col, region_col, m]].dropna(subset=[date_col]).copy()
     tmp["月"] = tmp[date_col].dt.to_period("M").dt.to_timestamp()
     import numpy as _np
@@ -381,10 +380,10 @@ with colx:
         mime="text/csv"
     )
 with coly:
-    if metric_cols:
+    if safe_metric_cols:
         t2 = fdf.copy()
         t2["月"] = t2[date_col].dt.to_period("M").dt.to_timestamp()
-        out = t2.groupby(["月", region_col])[metric_cols].mean().reset_index().sort_values(["月", region_col])
+        out = t2.groupby(["月", region_col])[safe_metric_cols].mean().reset_index().sort_values(["月", region_col])
         st.download_button(
             "月次集計（平均, CSV）をダウンロード",
             data=out.to_csv(index=False).encode("utf-8-sig"),
@@ -406,4 +405,3 @@ def _coerce_numeric_columns(df_in: pd.DataFrame, cols: list[str]):
         else:
             dropped_cols.append(c)
     return df_in, safe_cols, dropped_cols
-
