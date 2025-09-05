@@ -5,7 +5,8 @@ import pandas as pd
 import numpy as np
 import altair as alt
 import sqlite3
-from datetime import datetime, date
+from datetime import datetime, date, time
+from typing import Optional
 
 DB_PATH = "data.db"
 
@@ -15,29 +16,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# -----------------------------
-# Fonts & CSS (Noto Sans JP)
-# -----------------------------
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;600;700&display=swap');
-html, body, [class*="css"]  {
-  font-family: 'Noto Sans JP', sans-serif;
-}
-/* KPI cards */
-.kpi {
-  padding: 12px 16px;
-  border-radius: 12px;
-  border: 1px solid rgba(0,0,0,0.1);
-  background: rgba(0,0,0,0.03);
-}
-.small {
-  font-size: 12px;
-  color: #666;
-}
-</style>
-""", unsafe_allow_html=True)
 
 st.title("📊 エリア別入札データ 可視化ダッシュボード")
 
@@ -53,14 +31,13 @@ def init_db():
             CREATE TABLE IF NOT EXISTS records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT
             );
-        """)
-        # メタ情報（ユーザーが選んだ列名などを保管、将来拡張用）
+        """ )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 val TEXT
             );
-        """)
+        """ )
 
 def table_exists(conn, table_name: str) -> bool:
     q = "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
@@ -70,49 +47,37 @@ def num_rows() -> int:
     with get_conn() as conn:
         if not table_exists(conn, "records"):
             return 0
-        # recordsテーブルが空でも列が沢山ある可能性に注意
         try:
             return conn.execute("SELECT COUNT(1) FROM records").fetchone()[0]
         except:
             return 0
 
 def infer_and_create_records_table(df: pd.DataFrame):
-    """
-    初回取り込み時にrecordsテーブルがない場合、dfの列構成をもとに可変スキーマで生成する。
-    """
     with get_conn() as conn:
-        # recordsテーブルが空なら、一旦削除→作り直し（列を柔軟に反映）
         conn.execute("DROP TABLE IF EXISTS records;")
-        # 列名→SQL列定義（全てTEXTで取り込み、後段で型変換）
         cols_sql = ",\n".join([f'"{c}" TEXT' for c in df.columns])
         conn.execute(f"""
             CREATE TABLE records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 {cols_sql}
             );
-        """)
+        """ )
 
 def append_df(df: pd.DataFrame):
-    """
-    recordsへ追記。列が不足していれば拡張、余計な列は無視しない（拡張して取り込む）
-    """
     if df.empty:
         return 0
     with get_conn() as conn:
-        # 既存テーブルの列一覧を取得
         cur_cols = []
         try:
             cur = conn.execute("PRAGMA table_info(records);").fetchall()
-            cur_cols = [c[1] for c in cur]  # [cid, name, type, notnull, dflt, pk]
+            cur_cols = [c[1] for c in cur]
         except:
             pass
 
-        # 最初の取り込み or テーブルが未定義の時は作り直し
-        if not cur_cols or len(cur_cols) <= 1:  # idのみ等
+        if not cur_cols or len(cur_cols) <= 1:
             infer_and_create_records_table(df)
             cur_cols = [c[1] for c in conn.execute("PRAGMA table_info(records);").fetchall()]
 
-        # 不足している列があれば追加（TEXT型）
         add_cols = [c for c in df.columns if c not in cur_cols]
         for c in add_cols:
             try:
@@ -120,12 +85,10 @@ def append_df(df: pd.DataFrame):
             except Exception as e:
                 st.warning(f"列追加に失敗: {c} -> {e}")
 
-        # 取り込み
-        # 文字列化してからINSERT（型は後で選択可能に）
         df_to_insert = df.copy()
         for c in df_to_insert.columns:
             df_to_insert[c] = df_to_insert[c].astype(str)
-        # バルクインサート
+
         placeholders = ",".join(["?"] * len(df_to_insert.columns))
         colnames = ",".join([f'"{c}"' for c in df_to_insert.columns])
         conn.executemany(
@@ -147,7 +110,7 @@ def load_excel_all_sheets(file, add_region_from_sheet=True, region_col_name="地
         return pd.concat(frames, ignore_index=True)
     return pd.DataFrame()
 
-def get_all_records_df(limit: int|None=None) -> pd.DataFrame:
+def get_all_records_df(limit: Optional[int]=None) -> pd.DataFrame:
     with get_conn() as conn:
         if not table_exists(conn, "records"):
             return pd.DataFrame()
@@ -155,7 +118,6 @@ def get_all_records_df(limit: int|None=None) -> pd.DataFrame:
         if limit and limit > 0:
             q += f" LIMIT {int(limit)}"
         df = pd.read_sql_query(q, conn)
-    # id列は内部用
     if "id" in df.columns:
         df = df.drop(columns=["id"])
     return df
@@ -181,7 +143,8 @@ with st.sidebar:
     with col1:
         go = st.button("📥 取り込み/追加")
     with col2:
-        clear = st.button("🗑️ DBリセット（全削除）", type="secondary")
+        # Remove type='secondary' for compatibility
+        clear = st.button("🗑️ DBリセット（全削除）")
 
     if clear:
         reset_db()
@@ -201,61 +164,94 @@ with st.sidebar:
     st.caption("📦 現在のDB件数")
     st.metric(label="総レコード数", value=f"{num_rows():,}")
 
-# 取り込み済みデータの取得
 raw_df = get_all_records_df()
-
 if raw_df.empty:
-    st.info("まずは左のサイドバーからExcelを取り込んでください。複数シートは自動で縦結合され、オプションでシート名→地域列を付与できます。")
+    st.info("まずは左のサイドバーからExcelを取り込んでください。")
     st.stop()
 
 # -----------------------------
-# 列の役割をユーザー指定（柔軟対応）
+# 列の役割設定
 # -----------------------------
 st.subheader("🔎 列の役割設定")
+
 cols = list(raw_df.columns)
-# 推定候補
-date_cand = [c for c in cols if any(k in c.lower() for k in ["date", "日付", "日時", "time", "時刻", "開始", "取引"])]
-region_cand = [c for c in cols if any(k in c for k in ["地域","エリア","エリア名","供給エリア","エリアコード","エリア名","area","region","地域名"])]
+
+# 優先: 'ym' を日付候補に含める（先頭に置く）
+date_cand = []
+for c in cols:
+    if c.lower() == "ym":
+        date_cand.append(c)
+        break
+date_cand += [c for c in cols if any(k in c.lower() for k in ["date", "日付", "日時", "time", "時刻", "開始", "取引"]) and c not in date_cand]
+
+region_cand = [c for c in cols if any(k in c for k in ["地域","エリア","エリア名","供給エリア","エリアコード","area","region","地域名"])]
 numeric_cand = [c for c in cols if c not in date_cand and c not in region_cand]
+
+def _idx_or_default(opts, target):
+    try:
+        return opts.index(target)
+    except:
+        return 0
+
+default_date_col = date_cand[0] if date_cand else cols[0]
+default_region_col = region_cand[0] if region_cand else cols[-1]
 
 c1, c2, c3 = st.columns([1,1,2])
 with c1:
-    date_col = st.selectbox("日付列", options=cols, index=(cols.index(date_cand[0]) if date_cand else 0))
+    date_col = st.selectbox("日付列", options=cols, index=_idx_or_default(cols, default_date_col))
 with c2:
-    region_col = st.selectbox("地域列", options=cols, index=(cols.index(region_cand[0]) if region_cand else cols.index(cols[-1])))
+    region_col = st.selectbox("地域列", options=cols, index=_idx_or_default(cols, default_region_col))
 with c3:
     metric_cols = st.multiselect("数値列（複数選択可）", options=cols, default=[c for c in numeric_cand][:3])
 
-# 型変換
+# 追加機能：ym列の3時間刻み再構築
+st.markdown("**⏱️ ym列の時間再構築（3時間刻み）**")
+rebuild = st.checkbox("先頭を 2024-04-01 00:00、以降180分ずつインクリメントで再構築（地域ごと）", value=("ym" in [c.lower() for c in cols]))
+start_date = st.date_input("開始日", value=date(2024,4,1))
+start_time = st.time_input("開始時刻", value=time(0,0))
+
 df = raw_df.copy()
-# 日付
+
+if rebuild:
+    start_dt = datetime.combine(start_date, start_time)
+    try:
+        df["_row_order_"] = np.arange(len(df))
+        df[region_col] = df[region_col].astype(str)
+        out = []
+        for g, gdf in df.groupby(region_col, sort=False):
+            gdf = gdf.sort_values("_row_order_").copy()
+            rng = pd.date_range(start=start_dt, periods=len(gdf), freq="180min")
+            gdf[date_col] = pd.to_datetime(rng)
+            out.append(gdf)
+        df = pd.concat(out, ignore_index=True).sort_values("_row_order_").drop(columns=["_row_order_"])
+    except Exception as e:
+        st.warning(f"ym再構築でエラー: {e}")
+
 try:
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-except:
-    pass
-# 数値列（選択列のみ）
+except Exception as e:
+    st.warning(f"日付変換でエラー: {e}")
 for m in metric_cols:
-    # 数値に変換（カンマ等除去）
     df[m] = pd.to_numeric(df[m].astype(str).str.replace(",", ""), errors="coerce")
 
 # -----------------------------
 # フィルタ
 # -----------------------------
 st.subheader("🧰 フィルタ")
-# 地域
 regions = sorted([x for x in df[region_col].dropna().astype(str).unique().tolist()])
 sel_regions = st.multiselect("地域を選択", options=regions, default=regions)
-# 期間
+
 valid_dates = df[date_col].dropna()
 if valid_dates.empty:
-    st.warning("日付列に有効な値が見つかりませんでした。日付列の指定を見直してください。")
+    st.warning("日付列に有効な値が見つかりませんでした。日付列の指定や再構築設定を見直してください。")
     st.stop()
 min_d, max_d = valid_dates.min().date(), valid_dates.max().date()
+if min_d > max_d:
+    min_d, max_d = max_d, min_d
 r = st.slider("期間を指定", min_value=min_d, max_value=max_d, value=(min_d, max_d))
 freq = st.selectbox("集計粒度", options=["日次","週次","月次"], index=2)
 agg_mode = st.selectbox("集計方法", options=["平均","合計","中央値"], index=0)
 
-# フィルタ適用
 mask = (df[region_col].astype(str).isin(sel_regions)) & (df[date_col].dt.date.between(r[0], r[1]))
 fdf = df.loc[mask].copy()
 
@@ -266,14 +262,11 @@ if fdf.empty:
 # -----------------------------
 # 集計ユーティリティ
 # -----------------------------
-def resample_frame(frame: pd.DataFrame, on: str, by_region: bool, metrics: list[str], freq: str, how: str):
+def resample_frame(frame: pd.DataFrame, on: str, by_region: bool, metrics: list, freq: str, how: str):
     tmp = frame[[on, region_col] + metrics].dropna(subset=[on]).copy()
     tmp = tmp.sort_values(on)
-    # 周波数
     rule = {"日次":"D","週次":"W","月次":"MS"}[freq]
-    # 集計関数
     agg_map = {"平均":"mean","合計":"sum","中央値":"median"}[how]
-    # 時系列にするためset_index
     tmp = tmp.set_index(on)
     if by_region:
         grp = tmp.groupby(region_col)
@@ -293,25 +286,23 @@ def resample_frame(frame: pd.DataFrame, on: str, by_region: bool, metrics: list[
 st.subheader("📈 概要KPI")
 kc1, kc2, kc3, kc4 = st.columns(4)
 with kc1:
-    st.markdown('<div class="kpi">総件数<br><span class="small"></span><h3>{:,}</h3></div>'.format(len(fdf)), unsafe_allow_html=True)
+    st.metric("総件数", f"{len(fdf):,}")
 with kc2:
-    st.markdown('<div class="kpi">期間<br><h3>{} ～ {}</h3></div>'.format(r[0].strftime("%Y-%m-%d"), r[1].strftime("%Y-%m-%d")), unsafe_allow_html=True)
+    st.metric("期間", f"{r[0].strftime('%Y-%m-%d')} ～ {r[1].strftime('%Y-%m-%d')}")
 with kc3:
-    st.markdown('<div class="kpi">地域数<br><h3>{}</h3></div>'.format(len(sel_regions)), unsafe_allow_html=True)
+    st.metric("地域数", f"{len(sel_regions)}")
 with kc4:
-    st.markdown('<div class="kpi">選択指標<br><h3>{}</h3></div>'.format(len(metric_cols)), unsafe_allow_html=True)
+    st.metric("選択指標数", f"{len(metric_cols)}")
 
 # -----------------------------
 # 可視化
 # -----------------------------
 st.subheader("📊 可視化")
 
-# (A) 時系列（地域別）
 if metric_cols:
     for m in metric_cols:
         st.markdown(f"**時系列（{m}）**")
         ts = resample_frame(fdf, on=date_col, by_region=True, metrics=[m], freq=freq, how=agg_mode)
-        # Altair
         chart = alt.Chart(ts).mark_line(point=True).encode(
             x=alt.X(f"{date_col}:T", title="日時"),
             y=alt.Y(f"{m}:Q", title=m),
@@ -320,8 +311,6 @@ if metric_cols:
         ).properties(height=300)
         st.altair_chart(chart, use_container_width=True)
 
-# (B) 地域横比較（平均/合計/中央値）
-if metric_cols:
     st.markdown("**地域比較（期間内の集計値）**")
     agg_func = {"平均":"mean","合計":"sum","中央値":"median"}[agg_mode]
     comp = fdf.groupby(region_col)[metric_cols].agg(agg_func).reset_index()
@@ -333,11 +322,8 @@ if metric_cols:
     ).properties(height=280)
     st.altair_chart(chart, use_container_width=True)
 
-# (C) 分布（ヒストグラム）
-if metric_cols:
     st.markdown("**分布（ヒストグラム）**")
     m = st.selectbox("ヒストグラムの対象列", options=metric_cols, index=0)
-    # クリップして極端な外れ値を軽減（5~95%）
     series = fdf[m].dropna()
     if len(series) > 0:
         q5, q95 = np.nanpercentile(series, 5), np.nanpercentile(series, 95)
@@ -350,8 +336,6 @@ if metric_cols:
     else:
         st.info("ヒストグラム対象の有効データがありません。")
 
-# (D) ピボット（地域 × 月のマトリクス）
-if metric_cols:
     st.markdown("**ピボット（地域 × 月）**")
     m = st.selectbox("ピボット表示の対象列", options=metric_cols, index=0, key="pivot_metric")
     tmp = fdf[[date_col, region_col, m]].dropna(subset=[date_col]).copy()
@@ -373,7 +357,6 @@ with colx:
         mime="text/csv"
     )
 with coly:
-    # 集計例：月次×地域×各指標（平均）
     if metric_cols:
         t2 = fdf.copy()
         t2["月"] = t2[date_col].dt.to_period("M").dt.to_timestamp()
