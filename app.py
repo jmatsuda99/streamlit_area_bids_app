@@ -5,12 +5,13 @@ import pandas as pd
 import numpy as np
 import altair as alt
 import sqlite3
-import re
 import json
+import re
 from datetime import datetime, date, time
 from typing import Optional
 
 DB_PATH = "data.db"
+RENAME_JSON = "rename_config.json"
 
 st.set_page_config(
     page_title="エリア別入札データ可視化",
@@ -33,13 +34,13 @@ def init_db():
             CREATE TABLE IF NOT EXISTS records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT
             );
-        """ )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 val TEXT
             );
-        """ )
+        """)
 
 def table_exists(conn, table_name: str) -> bool:
     q = "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
@@ -63,13 +64,14 @@ def infer_and_create_records_table(df: pd.DataFrame):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 {cols_sql}
             );
-        """ )
+        """)
 
 def append_df(df: pd.DataFrame):
     # 取り込み前にリネーム設定を適用
     _map = _load_rename_map()
     if _map:
         df = df.rename(columns=_map)
+
     if df.empty:
         return 0
     with get_conn() as conn:
@@ -130,11 +132,13 @@ def get_all_records_df(limit: Optional[int]=None) -> pd.DataFrame:
 
 def reset_db():
     with get_conn() as conn:
+        conn.execute("DROP TABLE IF EXISTS records;")
+        conn.execute("DROP TABLE IF EXISTS meta;")
+    init_db()
 
-
-# ---- 列リネーム（内部DBへ反映）ユーティリティ ----
-RENAME_JSON = "rename_config.json"
-
+# -----------------------------
+# Rename helpers (DB-level)
+# -----------------------------
 def _sanitize_colname(name: str) -> str:
     if name is None:
         name = ""
@@ -164,15 +168,16 @@ def _rebuild_db_with_mapping(mapping: dict):
         raise ValueError("新しい列名が重複しています。重複を解消してください。")
     count = 0
     with get_conn() as conn:
-        c = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='records';").fetchone()
-        if not c:
+        if not table_exists(conn, "records"):
             return 0
         cols_info = conn.execute("PRAGMA table_info(records);").fetchall()
         cur_cols = [c[1] for c in cols_info if c[1] != "id"]
         new_cols = [mapping.get(c, c) for c in cur_cols]
+
         conn.execute("DROP TABLE IF EXISTS records_new;")
         cols_sql = ", ".join([f'"{c}" TEXT' for c in new_cols])
         conn.execute(f'CREATE TABLE records_new (id INTEGER PRIMARY KEY AUTOINCREMENT, {cols_sql});')
+
         cols_list = ", ".join([f'"{c}"' for c in cur_cols])
         rows = conn.execute(f"SELECT {cols_list} FROM records").fetchall()
         for r in rows:
@@ -181,20 +186,19 @@ def _rebuild_db_with_mapping(mapping: dict):
             placeholders = ",".join(["?"] * len(new_cols))
             conn.execute(f"INSERT INTO records_new ({new_cols_list}) VALUES ({placeholders})", [row_dict[c] for c in new_cols])
             count += 1
+
         conn.execute("DROP TABLE IF EXISTS records;")
         conn.execute("ALTER TABLE records_new RENAME TO records;")
         conn.commit()
     return count
 
-        conn.execute("DROP TABLE IF EXISTS records;")
-        conn.execute("DROP TABLE IF EXISTS meta;")
-    
-
-# ---- Numeric-only hardening for metrics ----
+# -----------------------------
+# Numeric-only hardening
+# -----------------------------
 def _coerce_numeric_columns(df_in: pd.DataFrame, cols):
     safe_cols = []
     dropped_cols = []
-    if cols is None:
+    if not cols:
         return df_in, [], []
     for c in cols:
         if c not in df_in.columns:
@@ -206,7 +210,6 @@ def _coerce_numeric_columns(df_in: pd.DataFrame, cols):
         else:
             dropped_cols.append(c)
     return df_in, safe_cols, dropped_cols
-init_db()
 
 # -----------------------------
 # Init
@@ -215,7 +218,8 @@ init_db()
 
 with st.sidebar:
     st.subheader("⚙️ データ管理")
-    st.caption("Excel（複数シート可）を取り込み、内部DB(SQLite)に保存します。以後はDBから高速に可視化できます。")
+    st.caption("Excel（複数シート可）を取り込み、内部DB(SQLite)に保存します。")
+
     uploaded = st.file_uploader("Excelファイルを選択（.xlsx）", type=["xlsx"], accept_multiple_files=True)
     add_region = st.checkbox("シート名を地域名として付与する", value=True)
     region_col_name = st.text_input("地域列の列名", value="地域")
@@ -223,7 +227,6 @@ with st.sidebar:
     with col1:
         go = st.button("📥 取り込み/追加")
     with col2:
-        # Remove type='secondary' for compatibility
         clear = st.button("🗑️ DBリセット（全削除）")
 
     if clear:
@@ -237,46 +240,46 @@ with st.sidebar:
                 df = load_excel_all_sheets(up, add_region_from_sheet=add_region, region_col_name=region_col_name)
                 total += append_df(df)
             except Exception as e:
-                st.error(f"{up.name} の取り込みに失敗: {e}")
+                st.error(f"{getattr(up, 'name', 'ファイル')} の取り込みに失敗: {e}")
         st.success(f"取り込み完了: {total} 行を追加しました。")
 
     st.write("---")
     st.caption("📦 現在のDB件数")
     st.metric(label="総レコード数", value=f"{num_rows():,}")
 
-
-st.write("---")
-with st.expander("📝 列リネーム（内部DBに適用）"):
-    current_map = _load_rename_map()
-    try:
-        with get_conn() as _c:
-            has_records = table_exists(_c, "records")
-            cols_info = _c.execute("PRAGMA table_info(records);").fetchall() if has_records else []
-            cur_cols = [c[1] for c in cols_info if c[1] != "id"]
-    except Exception:
-        has_records, cur_cols = False, []
-    if not has_records or not cur_cols:
-        st.caption("データを取り込むと、ここで列名の置き換えを設定できます。")
-    else:
-        st.caption("左が現在の列名。右に新しい列名（日本語など）を入力し、「保存」または「DBを再構築」を押します。")
-        new_map = {}
-        for c in cur_cols:
-            default_alias = current_map.get(c, c)
-            new_name = st.text_input(f"→ {c}", value=default_alias, key=f"rename_{c}")
-            new_map[c] = _sanitize_colname(new_name)
-        colA, colB = st.columns(2)
-        with colA:
-            if st.button("💾 リネーム設定を保存"):
-                _save_rename_map(new_map)
-                st.success("リネーム設定を保存しました。次回取り込みや再構築で有効になります。")
-        with colB:
-            if st.button("🛠️ DBをリネームに合わせて再構築"):
-                try:
+    st.write("---")
+    with st.expander("📝 列リネーム（内部DBに適用）"):
+        current_map = _load_rename_map()
+        try:
+            with get_conn() as _c:
+                has_records = table_exists(_c, "records")
+                cols_info = _c.execute("PRAGMA table_info(records);").fetchall() if has_records else []
+                cur_cols = [c[1] for c in cols_info if c[1] != "id"]
+        except Exception:
+            has_records, cur_cols = False, []
+        if not has_records or not cur_cols:
+            st.caption("データを取り込むと、ここで列名の置き換えを設定できます。")
+        else:
+            st.caption("左が現在の列名。右に新しい列名を入力し、「保存」または「DBを再構築」を押します。")
+            new_map = {}
+            for c in cur_cols:
+                default_alias = current_map.get(c, c)
+                new_name = st.text_input(f"→ {c}", value=default_alias, key=f"rename_{c}")
+                new_map[c] = _sanitize_colname(new_name)
+            colA, colB = st.columns(2)
+            with colA:
+                if st.button("💾 リネーム設定を保存"):
                     _save_rename_map(new_map)
-                    n = _rebuild_db_with_mapping(new_map)
-                    st.success(f"DBを再構築しました（{n:,} 行移行）。アプリを再読み込みしてください。")
-                except Exception as e:
-                    st.error(f"再構築に失敗: {e}")
+                    st.success("リネーム設定を保存しました。次回取り込みや再構築で有効になります。")
+            with colB:
+                if st.button("🛠️ DBをリネームに合わせて再構築"):
+                    try:
+                        _save_rename_map(new_map)
+                        n = _rebuild_db_with_mapping(new_map)
+                        st.success(f"DBを再構築しました（{n:,} 行移行）。アプリを再読み込みしてください。")
+                    except Exception as e:
+                        st.error(f"再構築に失敗: {e}")
+
 raw_df = get_all_records_df()
 if raw_df.empty:
     st.info("まずは左のサイドバーからExcelを取り込んでください。")
@@ -317,20 +320,19 @@ with c2:
 with c3:
     metric_cols = st.multiselect("数値列（複数選択可）", options=cols, default=[c for c in numeric_cand][:3])
 
-# 追加機能：ym列の3時間刻み再構築
+# ---- Numeric-only hardening ----
+df = raw_df.copy()
+df, safe_metric_cols, dropped_metrics = _coerce_numeric_columns(df, metric_cols)
+if dropped_metrics:
+    st.warning("数値化できなかった列を除外しました: " + ", ".join(dropped_metrics))
+
+# -----------------------------
+# ymの3時間刻み再構築
+# -----------------------------
 st.markdown("**⏱️ ym列の時間再構築（3時間刻み）**")
 rebuild = st.checkbox("先頭を 2024-04-01 00:00、以降180分ずつインクリメントで再構築（地域ごと）", value=("ym" in [c.lower() for c in cols]))
 start_date = st.date_input("開始日", value=date(2024,4,1))
 start_time = st.time_input("開始時刻", value=time(0,0))
-
-df = raw_df.copy()
-
-# 数値列の安全化と自動除外（全NaN列は除く）
-df, safe_metric_cols, dropped_metrics = _coerce_numeric_columns(df, metric_cols)
-if 'safe_metric_cols' not in locals():
-    safe_metric_cols = metric_cols
-if dropped_metrics:
-    st.warning('数値化できなかった列を除外しました: ' + ', '.join(dropped_metrics))
 
 if rebuild:
     start_dt = datetime.combine(start_date, start_time)
@@ -347,12 +349,12 @@ if rebuild:
     except Exception as e:
         st.warning(f"ym再構築でエラー: {e}")
 
+# Convert date and metrics
 try:
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
 except Exception as e:
     st.warning(f"日付変換でエラー: {e}")
-for m in safe_metric_cols:
-    df[m] = pd.to_numeric(df[m].astype(str).str.replace(",", ""), errors="coerce")
+
 # -----------------------------
 # フィルタ
 # -----------------------------
@@ -381,31 +383,21 @@ if fdf.empty:
 # -----------------------------
 # 集計ユーティリティ
 # -----------------------------
-def resample_frame(frame: pd.DataFrame, on: str, by_region: bool, metrics: list, freq: str, how: str):
-    """
-    Resample with selectable frequency. For '生データ(180分)', bypass aggregation and return raw 180min data.
-    """
+def resample_frame(frame: pd.DataFrame, on: str, by_region: bool, metrics: list, freq_label: str, how: str):
     tmp = frame[[on, region_col] + metrics].dropna(subset=[on]).copy()
     tmp = tmp.sort_values(on)
-    # Map label -> pandas rule; RAW means no resample
     rule_map = {"生データ(180分)": "RAW", "日次": "D", "週次": "W", "月次": "MS"}
-    rule = rule_map.get(freq, "MS")
-    agg_map = {"平均":"mean","合計":"sum","中央値":"median"}[how]
+    rule = rule_map.get(freq_label, "MS")
+    agg_map = {"平均": "mean", "合計": "sum", "中央値": "median"}[how]
 
-    # Ensure datetime index
     tmp = tmp.set_index(on)
-
-    # Cast metric columns to numeric again (safety)
     for m in metrics:
         tmp[m] = pd.to_numeric(tmp[m], errors="coerce")
 
     if rule == "RAW":
-        # Return raw rows (no resample). Keep needed columns.
         if by_region:
-            res = tmp.reset_index()[[on, region_col] + metrics]
-        else:
-            res = tmp.reset_index()[[on] + metrics]
-        return res
+            return tmp.reset_index()[[on, region_col] + metrics]
+        return tmp.reset_index()[[on] + metrics]
 
     if by_region:
         out = []
@@ -414,10 +406,9 @@ def resample_frame(frame: pd.DataFrame, on: str, by_region: bool, metrics: list,
             num[region_col] = g
             num = num.reset_index()
             out.append(num)
-        res = pd.concat(out, ignore_index=True)
+        return pd.concat(out, ignore_index=True)
     else:
-        res = tmp[metrics].resample(rule).agg(agg_map).reset_index()
-    return res
+        return tmp[metrics].resample(rule).agg(agg_map).reset_index()
 
 # -----------------------------
 # KPI
@@ -438,36 +429,26 @@ with kc4:
 # -----------------------------
 st.subheader("📊 可視化")
 
-# -----------------------------
-# 比率可視化（分子/分母）
-# -----------------------------
+# 比率（分子/分母）
 st.subheader("🧮 比率（分子/分母）")
 if safe_metric_cols:
     cnum, cden = st.columns(2)
     with cnum:
         ratio_num = st.selectbox("分子（系列）", options=safe_metric_cols, index=0, key="ratio_num")
     with cden:
-        ratio_den = st.selectbox("分母（系列）", options=[c for c in safe_metric_cols if c != ratio_num] or safe_metric_cols, index=0, key="ratio_den")
+        den_opts = [c for c in safe_metric_cols if c != ratio_num] or safe_metric_cols
+        ratio_den = st.selectbox("分母（系列）", options=den_opts, index=0, key="ratio_den")
 
-    # 計算ユーティリティ：NaN/ゼロ除去、0..1にクリップ（オプション）
     def _compute_ratio(frame, num_col, den_col):
         out = frame[[date_col, region_col, num_col, den_col]].copy()
         out[num_col] = pd.to_numeric(out[num_col], errors="coerce")
         out[den_col] = pd.to_numeric(out[den_col], errors="coerce")
-        # 0除算回避
         out = out[out[den_col].notna() & (out[den_col] != 0)]
         out["__ratio__"] = out[num_col] / out[den_col]
         return out[[date_col, region_col, "__ratio__"]]
 
-    # (A) 時系列（地域別、選択粒度）
-    st.markdown("**時系列（比率）**")
-    # まず選択メトリクスをリサンプリング（RAWは生データ）
-    rs = resample_frame(fdf, on=date_col, by_region=True, metrics=[ratio_num, ratio_den], freq=freq, how=agg_mode)
-    if "生データ(180分)" in freq:
-        rs_ratio = _compute_ratio(rs.rename(columns={ratio_num: ratio_num, ratio_den: ratio_den}), ratio_num, ratio_den)
-    else:
-        # 期間内の集計関数の選択に従っているため、リサンプル後の列をそのまま比率化
-        rs_ratio = _compute_ratio(rs, ratio_num, ratio_den)
+    rs = resample_frame(fdf, on=date_col, by_region=True, metrics=[ratio_num, ratio_den], freq_label=freq, how=agg_mode)
+    rs_ratio = _compute_ratio(rs, ratio_num, ratio_den)
 
     chart_ratio = alt.Chart(rs_ratio).mark_line(point=True).encode(
         x=alt.X(f"{date_col}:T", title="日時"),
@@ -477,7 +458,6 @@ if safe_metric_cols:
     ).properties(height=300)
     st.altair_chart(chart_ratio, use_container_width=True)
 
-    # (B) 地域比較（Σ分子/Σ分母）
     st.markdown("**地域比較（Σ分子/Σ分母）**")
     grp = fdf.groupby(region_col, dropna=True)
     comp_ratio = grp[ratio_num].sum(min_count=1) / grp[ratio_den].sum(min_count=1)
@@ -490,7 +470,6 @@ if safe_metric_cols:
     ).properties(height=320)
     st.altair_chart(chart_comp_ratio, use_container_width=True)
 
-    # (C) ダウンロード（時系列の比率）
     st.download_button(
         "比率の時系列（CSV）をダウンロード",
         data=rs_ratio.rename(columns={"__ratio__": "ratio"}).to_csv(index=False).encode("utf-8-sig"),
@@ -500,11 +479,11 @@ if safe_metric_cols:
 else:
     st.info("比率計算には数値列が必要です。まずは数値列を選択してください。")
 
-
+# 時系列（各メトリクス）
 if safe_metric_cols:
     for m in safe_metric_cols:
         st.markdown(f"**時系列（{m}）**")
-        ts = resample_frame(fdf, on=date_col, by_region=True, metrics=[m], freq=freq, how=agg_mode)
+        ts = resample_frame(fdf, on=date_col, by_region=True, metrics=[m], freq_label=freq, how=agg_mode)
         chart = alt.Chart(ts).mark_line(point=True).encode(
             x=alt.X(f"{date_col}:T", title="日時"),
             y=alt.Y(f"{m}:Q", title=m),
@@ -513,12 +492,11 @@ if safe_metric_cols:
         ).properties(height=300)
         st.altair_chart(chart, use_container_width=True)
 
+    # 地域比較（期間内の集計値）: グループ化棒
     st.markdown("**地域比較（期間内の集計値）**")
     agg_func = {"平均":"mean","合計":"sum","中央値":"median"}[agg_mode]
     comp = fdf.groupby(region_col)[safe_metric_cols].agg(agg_func).reset_index()
     melted = comp.melt(id_vars=[region_col], var_name="項目", value_name="値")
-    
-    # 項目ごとに、選択した複数の地域を1つのグラフ（グループ化棒グラフ）で表示
     chart = alt.Chart(melted).mark_bar().encode(
         x=alt.X("項目:N", title="項目"),
         xOffset=alt.XOffset(f"{region_col}:N"),
@@ -528,6 +506,7 @@ if safe_metric_cols:
     ).properties(height=320)
     st.altair_chart(chart, use_container_width=True)
 
+    # 分布（ヒストグラム）
     st.markdown("**分布（ヒストグラム）**")
     m = st.selectbox("ヒストグラムの対象列", options=safe_metric_cols, index=0)
     series = fdf[m].dropna()
@@ -542,12 +521,12 @@ if safe_metric_cols:
     else:
         st.info("ヒストグラム対象の有効データがありません。")
 
+    # ピボット（地域 × 月）
     st.markdown("**ピボット（地域 × 月）**")
     m = st.selectbox("ピボット表示の対象列", options=safe_metric_cols, index=0, key="pivot_metric")
     tmp = fdf[[date_col, region_col, m]].dropna(subset=[date_col]).copy()
     tmp["月"] = tmp[date_col].dt.to_period("M").dt.to_timestamp()
-    import numpy as _np
-    agg = tmp.pivot_table(index=region_col, columns="月", values=m, aggfunc=_np.mean)
+    agg = tmp.pivot_table(index=region_col, columns="月", values=m, aggfunc=np.mean)
     st.dataframe(agg.style.format("{:,.2f}"), use_container_width=True)
 
 # -----------------------------
@@ -575,4 +554,3 @@ with coly:
         )
 
 st.caption("© Streamlit app template for area bids by region (JP).")
-
