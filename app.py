@@ -5,6 +5,8 @@ import pandas as pd
 import numpy as np
 import altair as alt
 import sqlite3
+import re
+import json
 from datetime import datetime, date, time
 from typing import Optional
 
@@ -64,6 +66,10 @@ def infer_and_create_records_table(df: pd.DataFrame):
         """ )
 
 def append_df(df: pd.DataFrame):
+    # 取り込み前にリネーム設定を適用
+    _map = _load_rename_map()
+    if _map:
+        df = df.rename(columns=_map)
     if df.empty:
         return 0
     with get_conn() as conn:
@@ -124,6 +130,62 @@ def get_all_records_df(limit: Optional[int]=None) -> pd.DataFrame:
 
 def reset_db():
     with get_conn() as conn:
+
+
+# ---- 列リネーム（内部DBへ反映）ユーティリティ ----
+RENAME_JSON = "rename_config.json"
+
+def _sanitize_colname(name: str) -> str:
+    if name is None:
+        name = ""
+    s = str(name).strip()
+    s = re.sub(r"[\u3000\s]+", " ", s)
+    return s if s else "col"
+
+def _load_rename_map() -> dict:
+    try:
+        with open(RENAME_JSON, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_rename_map(mp: dict):
+    with open(RENAME_JSON, "w", encoding="utf-8") as f:
+        json.dump(mp, f, ensure_ascii=False, indent=2)
+
+def _rebuild_db_with_mapping(mapping: dict):
+    if not mapping:
+        return 0
+    tgt = [v for v in mapping.values()]
+    norm = [str(v).strip() for v in tgt]
+    if any(not x for x in norm):
+        raise ValueError("空の新列名があります。修正してください。")
+    if len(set(norm)) != len(norm):
+        raise ValueError("新しい列名が重複しています。重複を解消してください。")
+    count = 0
+    with get_conn() as conn:
+        c = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='records';").fetchone()
+        if not c:
+            return 0
+        cols_info = conn.execute("PRAGMA table_info(records);").fetchall()
+        cur_cols = [c[1] for c in cols_info if c[1] != "id"]
+        new_cols = [mapping.get(c, c) for c in cur_cols]
+        conn.execute("DROP TABLE IF EXISTS records_new;")
+        cols_sql = ", ".join([f'"{c}" TEXT' for c in new_cols])
+        conn.execute(f'CREATE TABLE records_new (id INTEGER PRIMARY KEY AUTOINCREMENT, {cols_sql});')
+        cols_list = ", ".join([f'"{c}"' for c in cur_cols])
+        rows = conn.execute(f"SELECT {cols_list} FROM records").fetchall()
+        for r in rows:
+            row_dict = {mapping.get(col, col): (str(val) if val is not None else None) for col, val in zip(cur_cols, r)}
+            new_cols_list = ", ".join([f'"{c}"' for c in new_cols])
+            placeholders = ",".join(["?"] * len(new_cols))
+            conn.execute(f"INSERT INTO records_new ({new_cols_list}) VALUES ({placeholders})", [row_dict[c] for c in new_cols])
+            count += 1
+        conn.execute("DROP TABLE IF EXISTS records;")
+        conn.execute("ALTER TABLE records_new RENAME TO records;")
+        conn.commit()
+    return count
+
         conn.execute("DROP TABLE IF EXISTS records;")
         conn.execute("DROP TABLE IF EXISTS meta;")
     
@@ -182,6 +244,39 @@ with st.sidebar:
     st.caption("📦 現在のDB件数")
     st.metric(label="総レコード数", value=f"{num_rows():,}")
 
+
+st.write("---")
+with st.expander("📝 列リネーム（内部DBに適用）"):
+    current_map = _load_rename_map()
+    try:
+        with get_conn() as _c:
+            has_records = table_exists(_c, "records")
+            cols_info = _c.execute("PRAGMA table_info(records);").fetchall() if has_records else []
+            cur_cols = [c[1] for c in cols_info if c[1] != "id"]
+    except Exception:
+        has_records, cur_cols = False, []
+    if not has_records or not cur_cols:
+        st.caption("データを取り込むと、ここで列名の置き換えを設定できます。")
+    else:
+        st.caption("左が現在の列名。右に新しい列名（日本語など）を入力し、「保存」または「DBを再構築」を押します。")
+        new_map = {}
+        for c in cur_cols:
+            default_alias = current_map.get(c, c)
+            new_name = st.text_input(f"→ {c}", value=default_alias, key=f"rename_{c}")
+            new_map[c] = _sanitize_colname(new_name)
+        colA, colB = st.columns(2)
+        with colA:
+            if st.button("💾 リネーム設定を保存"):
+                _save_rename_map(new_map)
+                st.success("リネーム設定を保存しました。次回取り込みや再構築で有効になります。")
+        with colB:
+            if st.button("🛠️ DBをリネームに合わせて再構築"):
+                try:
+                    _save_rename_map(new_map)
+                    n = _rebuild_db_with_mapping(new_map)
+                    st.success(f"DBを再構築しました（{n:,} 行移行）。アプリを再読み込みしてください。")
+                except Exception as e:
+                    st.error(f"再構築に失敗: {e}")
 raw_df = get_all_records_df()
 if raw_df.empty:
     st.info("まずは左のサイドバーからExcelを取り込んでください。")
