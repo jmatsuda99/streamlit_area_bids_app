@@ -532,6 +532,79 @@ if safe_metric_cols:
 # -----------------------------
 # データ出力
 # -----------------------------
+
+# -----------------------------
+# 📥 グラフ用データのエクスポート
+# -----------------------------
+st.subheader("📥 グラフ用データのエクスポート")
+
+# (1) 時系列（全メトリクス, tidy形式）
+try:
+    if safe_metric_cols:
+        ts_all = resample_frame(
+            fdf, on=date_col, by_region=True,
+            metrics=safe_metric_cols, freq_label=freq, how=agg_mode
+        )
+        ts_tidy = ts_all.melt(id_vars=[date_col, region_col], var_name="metric", value_name="value")
+        st.download_button(
+            "時系列（全メトリクス, tidy CSV）",
+            data=ts_tidy.to_csv(index=False).encode("utf-8-sig"),
+            file_name="timeseries_all_tidy.csv",
+            mime="text/csv"
+        )
+except Exception as e:
+    st.warning(f"時系列データのエクスポートでエラー: {e}")
+
+# (2) 地域比較（期間内集計, tidy形式）
+try:
+    if safe_metric_cols:
+        _agg = {"平均": "mean", "合計": "sum", "中央値": "median"}[agg_mode]
+        comp_export = fdf.groupby(region_col)[safe_metric_cols].agg(_agg).reset_index()
+        comp_tidy = comp_export.melt(id_vars=[region_col], var_name="metric", value_name="value")
+        st.download_button(
+            "地域比較（期間内集計, tidy CSV）",
+            data=comp_tidy.to_csv(index=False).encode("utf-8-sig"),
+            file_name="region_comparison_tidy.csv",
+            mime="text/csv"
+        )
+except Exception as e:
+    st.warning(f"地域比較データのエクスポートでエラー: {e}")
+
+# (3) ヒストグラム用データ（5–95%でトリミング）
+try:
+    if safe_metric_cols:
+        _m_hist = st.selectbox("ヒスト出力の対象列（CSV）", options=safe_metric_cols, index=0, key="hist_export_metric")
+        _series = fdf[_m_hist].dropna()
+        if len(_series) > 0:
+            q5, q95 = np.nanpercentile(_series, 5), np.nanpercentile(_series, 95)
+            hist_df = pd.DataFrame({_m_hist: _series.clip(q5, q95)})
+            st.download_button(
+                "ヒストグラム用データ（トリミング後 CSV）",
+                data=hist_df.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"hist_data_{_m_hist}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("ヒスト出力対象の有効データがありません。")
+except Exception as e:
+    st.warning(f"ヒストグラム用データのエクスポートでエラー: {e}")
+
+# (4) ピボット（地域×月）
+try:
+    if safe_metric_cols:
+        _m_pivot = st.selectbox("ピボット出力の対象列（CSV）", options=safe_metric_cols, index=0, key="pivot_export_metric")
+        _tmp = fdf[[date_col, region_col, _m_pivot]].dropna(subset=[date_col]).copy()
+        _tmp["月"] = _tmp[date_col].dt.to_period("M").dt.to_timestamp()
+        _pivot_df = _tmp.pivot_table(index=region_col, columns="月", values=_m_pivot, aggfunc=np.mean).reset_index()
+        st.download_button(
+            "ピボット（地域×月 CSV）",
+            data=_pivot_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"pivot_region_month_{_m_pivot}.csv",
+            mime="text/csv"
+        )
+except Exception as e:
+    st.warning(f"ピボットデータのエクスポートでエラー: {e}")
+
 st.subheader("⬇️ データ出力")
 colx, coly = st.columns(2)
 with colx:
